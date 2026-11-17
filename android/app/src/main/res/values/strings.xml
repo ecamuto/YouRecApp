@@ -1,0 +1,4 @@
+<resources>
+    <!-- Temporary development label. Distribution branding is a separate decision. -->
+    <string name="app_name">Camera Lab</string>
+</resources>
