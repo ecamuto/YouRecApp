@@ -1,5 +1,10 @@
 # YouRec
 
+> **Android development in this fork:** the first capture prototype lives in
+> [`android/`](android/README.md). See the [porting plan](docs/ANDROID-PLAN.md) and
+> [verification status](docs/ANDROID-QA.md). It is not yet a complete Android port.
+> The iPhone app documented below remains the original implementation.
+
 YouRec is a native iPhone camera and multitrack video editor for iOS 17 and later. After two years of running a [YouTube channel](https://youtube.com/antirez) and editing my videos in DaVinci Resolve™, I had two frustrations.
 
 1. The iPhone Camera app doesn’t give me the controls I want. I want to switch between the front and rear cameras while recording, track my face, have more control over dual-camera layouts, and append new footage to an existing video.
