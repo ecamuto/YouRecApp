@@ -3,6 +3,14 @@
 17 novembre 2026, branch `android/bootstrap`. Questo passo implementa il prototipo
 acquisizione della fase 0. Non completa la fase né il porting dell'editor.
 
+## Passo successivo: prototipo 0.3
+
+Il cambio camera durante il take è implementato e collaudato nelle prove brevi
+sul Samsung. Il percorso 0.3 usa un compositore GPU aggiuntivo: le misure seguenti
+restano riferite al backend 0.2. Il rapporto 0.3 documenta separatamente nuove prove,
+fermo immagine durante il cambio e limiti delle misure audio.
+Dettagli: [ANDROID-SWITCH.md](ANDROID-SWITCH.md).
+
 ## Problema e comportamento implementato
 
 Nel backend CameraX 0.1 la pausa/ripresa lasciava un intervallo massimo di
@@ -11,8 +19,9 @@ I controlli funzionavano, ma non era una base sufficiente per il motore previsto
 
 Il backend attuale usa Camera2 e due encoder MediaCodec, con AudioRecord separato
 dalla camera. Una sola timeline ammette gli intervalli attivi di entrambe le sorgenti.
-Il resume richiede un keyframe: la UI resta in ripresa della registrazione finché
-arriva un punto video decodificabile, e lo stesso istante apre il gate PCM.
+Il resume richiede un keyframe: all'uscita dalla pausa l'encoder riceve una richiesta
+di sync frame e la UI resta nello stato `RESUMING` ("Preparazione ripresa…") finché
+arriva un fotogramma video decodificabile; lo stesso istante apre il gate PCM.
 Questo evita di comprimere indipendentemente i buchi delle due tracce.
 
 | Componente | Responsabilità |
@@ -36,12 +45,16 @@ Riferimenti: [AudioTimestamp](https://developer.android.com/reference/android/me
 In pausa camera, microfono e codec restano attivi. Il video viene escluso prima
 del muxer e il PCM viene escluso **prima dell'AAC**; i campioni sospesi non finiscono
 nel file. Il consumo durante la pausa resta da ottimizzare. Code e attese sono
-limitate; un timeout o una discontinuità PCM oltre la tolleranza interrompono la
+limitate: al massimo 200 blocchi PCM in attesa del keyframe, 100 ingressi verso
+l'encoder audio e 5 s per la chiusura. Una discontinuità PCM oltre 3 ms fra PTS
+atteso e timestamp del campione, una coda piena o il timeout interrompono la
 ripresa con errore anziché nascondere la perdita. Allo stop si attende il drenaggio
 della sequenza camera prima dell'EOS video, e si finalizza dopo l'EOS di entrambe le tracce.
 
 Il file è AVC 1920×1080 SDR, senza B-frame, con rotazione MP4 per portrait;
 AAC LC stereo 48 kHz. Richiesti 30 fps e 17 Mb/s video, 256 kb/s audio.
+L'intervallo richiesto fra keyframe è 1 s; al resume il sync frame viene chiesto
+esplicitamente, senza attendere il keyframe periodico.
 Il contenuto selfie resta non specchiato nel file. La preview applica il mirror
 attraverso l'output Camera2, perché una scala della View non ha prodotto il mirror
 atteso della superficie separata sul Samsung. La misura della SurfaceView avviene
@@ -97,20 +110,24 @@ Quattro file della build finale passano PTS e decodifica integrale:
 | Selfie landscape, pausa/ripresa | `d7d808d9-d0bf-4515-beb6-ca74f17fea93.mp4` | 33,356 ms | 21,334 ms |
 
 In entrambe le sessioni finali: nuova registrazione dopo stop, apertura del lettore
-dal pulsante pubblico e ritorno alla camera inattiva. Le 21 riprese completate
-restano sul telefono, comprese tutte le 9 preesistenti con SHA-256 invariato.
-Nessun file cancellato; preferenze di rotazione globali invariate rispetto allo snapshot.
+dal pulsante pubblico e ritorno alla camera inattiva. Al termine di quella sessione
+le 21 riprese completate erano sul telefono, comprese tutte le 9 preesistenti con
+SHA-256 invariato. Nessun file cancellato; preferenze di rotazione globali invariate
+rispetto allo snapshot. In seguito, su richiesta dell'utente, i file di test sono
+stati rimossi dal telefono dopo un'archiviazione locale verificata:
+[interruzioni e pulizia](ANDROID-INTERRUPTIONS.md).
 
 ## Riproducibilità ed evidenze
 
-Directory locali escluse da Git, contenenti anche immagini e audio privati:
+Directory locali escluse da Git, contenenti anche immagini e audio privati.
+Tutti i percorsi sono relativi alla radice del repository:
 
 - `.benchmarks/android/20261117T064941Z/`: backend CameraX storico e backup iniziali.
 - `.benchmarks/android/pause-resume/`: inventario e checksum delle 9 riprese preesistenti, preferenze iniziali, prima prova nativa, sorgenti di confronto.
-- `pause-resume/final/`: tre prove della tabella, screenshot/XML, log, `all-timing-check.json`, `tone-check.json`, controllo positivo e negativo, snapshot sorgente/hash.
-- `final/release-check/` e `final/acceptance/`: prove successive di stop, riavvio e lettore; snapshot con hash per distinguere le build intermedie.
-- `final/preview-fix/` e `final/landscape-final/`: prove fisiche verticali/orizzontali dopo l'ultima correzione, screenshot e fotogrammi confrontati, file e `timing.json`; snapshot/hash in `preview-fix/`.
-- `final/sha256-originals-after.txt` e `final/settings-after.json`: verifica conservazione dati e preferenze.
+- `.benchmarks/android/pause-resume/final/`: tre prove della tabella, screenshot/XML, log, `all-timing-check.json`, `tone-check.json`, controllo positivo e negativo, snapshot sorgente/hash.
+- `.benchmarks/android/pause-resume/final/release-check/` e `.../final/acceptance/`: prove successive di stop, riavvio e lettore; snapshot con hash per distinguere le build intermedie.
+- `.benchmarks/android/pause-resume/final/preview-fix/` e `.../final/landscape-final/`: prove fisiche verticali/orizzontali dopo l'ultima correzione, screenshot e fotogrammi confrontati, file e `timing.json`; snapshot/hash in `preview-fix/`.
+- `.benchmarks/android/pause-resume/final/sha256-originals-after.txt` e `.../final/settings-after.json`: verifica conservazione dati e preferenze.
 
 La build delle tre misure principali ha SHA-256 APK
 `ece2d3c28d2318911e59a428d720864d9cc05d491bf8850d1e2cc878c109d730`.
@@ -134,7 +151,9 @@ Build completata con JDK 21/SDK 36:
 `./gradlew :app:assembleDebug :app:testDebugUnitTest :app:lintDebug`.
 **9 test JVM superati**, 0 errori lint, 6 avvisi di aggiornamento versioni.
 Cinque test verificano clock/tagli PCM e quattro persistenza/pubblicazione dei file.
-Non è stata modificata la pipeline iOS; nessun commit creato in questo passo.
+Non è stata modificata la pipeline iOS. I sorgenti Kotlin, Gradle e XML dello snapshot
+della build finale (`.benchmarks/android/pause-resume/final/preview-fix/source.tar.gz`) coincidono con il commit
+`bf05e54` del branch `android/bootstrap`.
 
 ## Limiti e prossima verifica
 
@@ -146,8 +165,8 @@ Non dichiarare acquisizione pronta al rilascio finché non passano anche:
 - Recupero dopo terminazione forzata: il MP4 non è frammentato; conservare `pending` non ne garantisce il recupero. Lo stop a inizio configurazione è gestito, ma richiede ulteriori prove di stress.
 - Misura di sincronismo assoluto, priming AAC, click ai tagli e ascolto su materiale rappresentativo. PTS regolari non equivalgono a lip-sync provato.
 
-Cambio camera durante il take ancora assente. Il nuovo AudioRecord indipendente
-permette di affrontarlo come passo successivo, mantenendo la sorgente audio;
-non ne dimostra già la continuità durante riconfigurazione. Rendering/export,
+Al termine del collaudo 0.2 il cambio camera durante il take era ancora assente.
+Il prototipo 0.3 lo implementa mantenendo la sorgente audio, con misure e verifiche
+fisiche separate nel rapporto dedicato. Rendering/export,
 modello progetto, editor, ML e compatibilità iOS rimangono i successivi blocchi del
 [piano](ANDROID-PLAN.md).

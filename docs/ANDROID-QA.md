@@ -1,6 +1,22 @@
 # Android: verifica del prototipo di acquisizione
 
-## Stato attuale: motore 0.2
+## Stato attuale: motore 0.3
+
+Il prototipo installato sul Samsung ora consente cambio camera durante il take e
+in pausa, con encoder/audio persistenti e compositore GPU. Verificati orientamento,
+mirror, stop/Home durante cambio, doppio tocco, riapertura e file reali. Build,
+9 test JVM e lint passano (0 errori, 6 avvisi di versione). Il passaggio mantiene
+circa un secondo di fermo immagine; limiti, misure e anomalia di livello audio
+conservata sono descritti in [ANDROID-SWITCH.md](ANDROID-SWITCH.md).
+Take lunghi, sincronismo assoluto e secondo OEM restano aperti.
+
+Verificati anche spegnimento schermo durante il take e terminazione forzata:
+lo spegnimento finalizza un file leggibile; il kill conserva un pending non
+riproducibile. Riapertura, avviso in libreria e nuova ripresa passano; il recupero
+rimane da implementare. Evidenze e pulizia autorizzata delle riprese di test:
+[ANDROID-INTERRUPTIONS.md](ANDROID-INTERRUPTIONS.md).
+
+## Riferimento: motore 0.2
 
 Il backend CameraX descritto sotto è stato sostituito da Camera2/MediaCodec con
 AudioRecord indipendente e clock comune. **Build, 9 test JVM e lint passano**

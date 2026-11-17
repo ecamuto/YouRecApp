@@ -5,6 +5,14 @@
 Implementazione avviata nel fork: [primo prototipo di acquisizione](../android/README.md).
 Per i risultati effettivi e le prove ancora necessarie, consultare [ANDROID-QA.md](ANDROID-QA.md).
 
+## Aggiornamento implementazione 0.3
+
+Cambio camera durante il take implementato con compositore GPU persistente e audio
+indipendente. Build/test/lint passano; prove brevi sul Samsung completate nelle
+due direzioni, anche in pausa, con confronto preview/file e misure audio.
+Il passaggio mantiene un fermo immagine di circa un secondo. Restano prove lunghe,
+secondo OEM e qualità/sincronismo A/V. Comportamento, misure e anomalia audio conservata: [ANDROID-SWITCH.md](ANDROID-SWITCH.md).
+
 ## Avanzamento verificato della fase 0
 
 Il prototipo 0.2 usa Camera2/MediaCodec e AudioRecord indipendente. Il clock comune
@@ -13,11 +21,15 @@ SM-A256B mostrano PTS continui al resume e assenza del tono riprodotto durante l
 Registrazione e file reali sulle due camere, libreria, stop da pausa e background
 sono stati collaudati. Dettagli: [motore di acquisizione](ANDROID-CAPTURE.md).
 
-La fase 0 resta **parziale**: cambio camera durante il take, misure di drift/termica
-su 30–60 minuti, secondo produttore, interruzioni e recovery sono ancora da provare
-o implementare. I prototipi rendering/export e conversione ML non sono iniziati.
-La prossima estensione del motore è il cambio camera attivo conservando la sorgente
-audio e il clock; richiede una propria verifica fisica e non è incluso nelle prove attuali.
+La fase 0 resta **parziale**: misure di drift/termica su 30–60 minuti, secondo
+produttore, interruzioni audio e recovery sono ancora da provare o implementare.
+Verificati spegnimento schermo e terminazione forzata durante un take: il primo
+salva il file, la seconda conserva i byte ma lascia il take non riproducibile.
+Riapertura, avviso e nuova ripresa funzionano; il recupero resta aperto.
+Evidenze: [ANDROID-INTERRUPTIONS.md](ANDROID-INTERRUPTIONS.md).
+I prototipi rendering/export e conversione ML non sono iniziati.
+Il cambio camera attivo è implementato e collaudato nelle prove brevi del prototipo
+0.3; le misure 0.2 descritte qui restano separate dal nuovo percorso GPU.
 
 ## Obiettivo e ipotesi
 
