@@ -184,17 +184,22 @@ private fun CaptureControls(state: CaptureState, controller: CaptureController, 
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!state.busy) {
-                Button(enabled = state.ready, onClick = start) { Text("Registra") }
-                OutlinedButton(enabled = state.canSwitch, onClick = controller::switchCamera) {
+                Button(enabled = state.ready && !state.switching, onClick = start) { Text("Registra") }
+                OutlinedButton(enabled = state.canChangeCamera, onClick = controller::switchCamera) {
                     Text(if (state.front) "Posteriore" else "Frontale")
                 }
             } else {
                 Button(enabled = state.phase !in listOf(CapturePhase.STOPPING, CapturePhase.SAVING), onClick = { controller.stop() }) {
                     Text("Ferma")
                 }
-                OutlinedButton(enabled = state.phase in listOf(CapturePhase.RECORDING, CapturePhase.PAUSED), onClick = controller::pauseOrResume) {
+                OutlinedButton(enabled = !state.switching && state.phase in listOf(CapturePhase.RECORDING, CapturePhase.PAUSED), onClick = controller::pauseOrResume) {
                     Text(if (state.phase == CapturePhase.PAUSED) "Riprendi" else "Pausa")
                 }
+            }
+        }
+        if (state.busy) {
+            OutlinedButton(enabled = state.canChangeCamera, onClick = controller::switchCamera) {
+                Text(if (state.front) "Posteriore" else "Frontale")
             }
         }
         if (!state.ready && !state.busy) {

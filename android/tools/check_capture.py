@@ -20,7 +20,7 @@ def run(*args):
     return subprocess.check_output(list(args))
 
 
-def tone_analysis(path, frequencies):
+def read_audio(path):
     track = json.loads(run("ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries",
                            "stream=channels", "-of", "json", str(path)))["streams"][0]
     channels = int(track["channels"])
@@ -29,6 +29,47 @@ def tone_analysis(path, frequencies):
                      "-ar", "16000", "-f", "f32le", "-"))
     if sys.byteorder != "little":
         pcm.byteswap()
+    return pcm, channels
+
+
+def tone_continuity(path, frequency):
+    """Controlled steady-tone probe: 20 ms windows every 10 ms, each channel.
+
+    Excludes 200 ms at each end for AAC priming/tail. It can detect short source
+    dropouts even when the AAC packet timestamps themselves remain continuous.
+    Do not apply to arbitrary speech or a tone that was deliberately stopped.
+    """
+    pcm, channels = read_audio(path)
+    frames = len(pcm) // channels
+    if frames < 9600:
+        raise ValueError("Continuous-tone probe requires at least 0.6 seconds")
+    coefficient = 2 * math.cos(2 * math.pi * frequency / 16000)
+    results = []
+    for channel in range(channels):
+        minimum, minimum_at = 0.0, 0.0
+        missing = []
+        windows = 0
+        for start in range(3200, frames - 3200 - 320 + 1, 160):
+            a = b = 0.0
+            for sample in pcm[start * channels + channel:(start + 320) * channels:channels]:
+                a, b = sample + coefficient * a - b, a
+            power = max(1e-20, (a * a + b * b - coefficient * a * b) / (320 * 320))
+            db = 10 * math.log10(4 * power)
+            windows += 1
+            if db < minimum:
+                minimum, minimum_at = db, start / 16000
+            if db < -55:
+                missing.append(start / 16000)
+        results.append({"channel": channel, "windows": windows,
+                        "minimumAmplitudeDbfs": minimum, "minimumAtSeconds": minimum_at,
+                        "windowsBelowMinus55Dbfs": missing, "passed": not missing})
+    return {"frequencyHz": frequency, "windowMs": 20, "hopMs": 10,
+            "trimEachEndMs": 200, "channels": results,
+            "passed": all(r["passed"] for r in results)}
+
+
+def tone_analysis(path, frequencies):
+    pcm, channels = read_audio(path)
     peaks = {str(f): {"sineAmplitudeDbfs": -200.0, "atSeconds": 0.0, "isolatedRuns": []} for f in frequencies}
     for channel in range(channels):
         # Test each microphone channel independently: a mono mix can cancel an out-of-phase tone.
@@ -110,6 +151,10 @@ def inspect(path, args):
         for frequency in args.reject_tone_hz:
             if result["toneAnalysis"][str(frequency)]["isolatedRuns"]:
                 result["errors"].append(f"Excluded tone {frequency:g} Hz detected")
+    if args.continuous_tone_hz is not None:
+        result["toneContinuity"] = tone_continuity(path, args.continuous_tone_hz)
+        if not result["toneContinuity"]["passed"]:
+            result["errors"].append("Continuous tone falls below -55 dBFS in one or more 20 ms windows")
     result["passed"] = not result["errors"]
     return result
 
@@ -123,6 +168,8 @@ def main():
     parser.add_argument("--tone-hz", type=float, action="append", default=[])
     parser.add_argument("--require-tone-hz", type=float, action="append", default=[])
     parser.add_argument("--reject-tone-hz", type=float, action="append", default=[])
+    parser.add_argument("--continuous-tone-hz", type=float,
+                        help="Check a deliberately played steady tone for short dropouts on each channel")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     reports = []

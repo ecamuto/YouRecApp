@@ -6,6 +6,7 @@ data class CaptureState(
     val ready: Boolean = false,
     val front: Boolean = false,
     val canSwitch: Boolean = false,
+    val switching: Boolean = false,
     val phase: CapturePhase = CapturePhase.IDLE,
     val elapsedNs: Long = 0,
     val bytes: Long = 0,
@@ -16,5 +17,7 @@ data class CaptureState(
     val libraryError: String? = null,
 ) {
     val busy: Boolean get() = phase != CapturePhase.IDLE
+    val canChangeCamera: Boolean get() = ready && canSwitch && !switching &&
+        phase in listOf(CapturePhase.IDLE, CapturePhase.RECORDING, CapturePhase.PAUSED)
 }
 

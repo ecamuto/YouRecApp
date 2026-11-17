@@ -59,6 +59,7 @@ internal class AvRecorder(
     private var videoEnded = false
     private var audioEnded = false
     private var microphoneEnded = false
+    private var microphoneStarted = false
     private var audioEosQueued = false
     private var finished = false
     @Volatile private var stopping = false
@@ -91,6 +92,9 @@ internal class AvRecorder(
                 setInteger(MediaFormat.KEY_FRAME_RATE, 30)
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
                 setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+                setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+                setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+                setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
             }
             video.setCallback(callback(true), handler)
             video.configure(vf, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
@@ -130,6 +134,7 @@ internal class AvRecorder(
         try {
             microphone.registerAudioRecordingCallback(Executor { handler.post(it) }, recordingCallback)
             microphone.startRecording()
+            microphoneStarted = true
         } catch (error: Exception) {
             runCatching { microphone.unregisterAudioRecordingCallback(recordingCallback) }
             microphone.release()
@@ -204,6 +209,10 @@ internal class AvRecorder(
         stopping = true
         clock.stop(nowUs())
         onPhase(CapturePhase.STOPPING)
+        if (!microphoneStarted && !microphoneEnded) {
+            microphoneEnded = true
+            runCatching { microphone.release() }
+        }
         runCatching { microphone.stop() }
         if (microphoneEnded) feedAudio()
         // Camera requests already in flight may still carry pre-stop timestamps.
@@ -217,6 +226,7 @@ internal class AvRecorder(
 
     fun abort(reason: String) {
         if (finished) return
+        Log.e(TAG, reason)
         if (failure == null) failure = reason
         if (!stopping) stop()
     }

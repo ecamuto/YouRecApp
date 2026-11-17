@@ -4,6 +4,7 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.SurfaceTexture
 import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraDevice
@@ -11,10 +12,10 @@ import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
-import android.media.MediaCodec
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.util.Size
 import android.view.Surface
@@ -61,6 +62,11 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
     private var generation = 0
     private var sessionGeneration = 0
     private var recorder: AvRecorder? = null
+    private var compositor: VideoCompositor? = null
+    private var takeRotation = 0
+    private var closingCamera: CameraDevice? = null
+    private var reopenOnClosed = false
+    private var switchAttempt = 0
     private var pendingDrain: Pair<CameraCaptureSession, () -> Unit>? = null
 
     init { refreshRecordings() }
@@ -84,7 +90,7 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
 
     override fun onStart(owner: LifecycleOwner) {
         displayRotation = view?.display?.rotation ?: Surface.ROTATION_0
-        handler.post { foreground = true; openCamera() }
+        handler.post { foreground = true; reopenOnClosed = true; openCamera() }
     }
 
     override fun onStop(owner: LifecycleOwner) { handler.post { foreground = false; recorder?.stop(); closeCamera() } }
@@ -99,19 +105,39 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
     }
 
     fun switchCamera() {
-        if (state.value.busy || !state.value.canSwitch) return
+        if (!state.value.canChangeCamera) return
         displayRotation = view?.display?.rotation ?: Surface.ROTATION_0
-        handler.post { front = !front; closeCamera(); openCamera() }
+        mutableState.value = state.value.copy(switching = true,
+            message = switchMessage(state.value.phase))
+        handler.post {
+            if (disposed || !foreground || recorder?.isStopping == true) {
+                update { it.copy(switching = false) }
+                return@post
+            }
+            val writer = recorder
+            val attempt = ++switchAttempt
+            compositor?.beginSwitch()
+            front = !front
+            closeCamera(reopen = true)
+            openCamera()
+            handler.postDelayed({
+                if (attempt == switchAttempt && state.value.switching) {
+                    if (writer != null && writer === recorder && !writer.isStopping)
+                        cameraFailed("Cambio camera non completato entro 5 secondi.")
+                    else if (writer == null) cameraFailed("Apertura della nuova camera scaduta.")
+                }
+            }, 5_000)
+        }
     }
 
-    fun retryCamera() { if (!state.value.busy) handler.post { closeCamera(); openCamera() } }
+    fun retryCamera() { if (!state.value.busy) handler.post { closeCamera(reopen = true); openCamera() } }
 
     @SuppressLint("MissingPermission") // Runtime permission checked before opening.
     private fun openCamera() {
-        if (disposed || !foreground || previewSurface == null || device != null || opening || recorder != null) return
+        if (disposed || !foreground || previewSurface == null || device != null || closingCamera != null || opening || recorder?.isStopping == true) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) return
         val token = ++generation
-        update { it.copy(ready = false, message = "Apertura fotocamera…") }
+        update { it.copy(ready = false, message = if (it.switching) switchMessage(it.phase) else "Apertura fotocamera…") }
         try {
             val cameras = manager.cameraIdList.map { it to manager.getCameraCharacteristics(it) }
             val back = cameras.firstOrNull { it.second[CameraCharacteristics.LENS_FACING] == CameraCharacteristics.LENS_FACING_BACK }
@@ -124,7 +150,7 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
                 "Il prototipo richiede timestamp camera REALTIME confrontabili con il microfono."
             }
             val map = checkNotNull(selected.second[CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP])
-            check(Size(1920, 1080) in map.getOutputSizes(MediaCodec::class.java).orEmpty() &&
+            check(Size(1920, 1080) in map.getOutputSizes(SurfaceTexture::class.java).orEmpty() &&
                 Size(1920, 1080) in map.getOutputSizes(SurfaceHolder::class.java).orEmpty()) {
                 "Camera priva della combinazione 1080p SDR richiesta."
             }
@@ -140,6 +166,12 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
                 }
                 override fun onDisconnected(camera: CameraDevice) { camera.close(); cameraFailed("Fotocamera disconnessa.", token) }
                 override fun onError(camera: CameraDevice, error: Int) { camera.close(); cameraFailed("Errore camera $error.", token) }
+                override fun onClosed(camera: CameraDevice) {
+                    if (closingCamera === camera) {
+                        closingCamera = null
+                        if (reopenOnClosed) { reopenOnClosed = false; openCamera() }
+                    }
+                }
             })
         } catch (error: Exception) { cameraFailed(error.message ?: "Apertura camera fallita.", token) }
     }
@@ -155,7 +187,7 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
         opening = false
         recorder?.abort(reason)
         closeCamera()
-        update { it.copy(ready = false, message = reason) }
+        update { it.copy(ready = false, switching = false, message = reason) }
     }
 
     private fun createSession() {
@@ -165,10 +197,13 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
         session?.close()
         session = null
         val writer = recorder
-        val surfaces = listOfNotNull(preview, writer?.surface)
+        val surfaces = listOfNotNull(preview, if (writer != null) compositor?.surface else null)
         try {
             camera.createCaptureSession(SessionConfiguration(SessionConfiguration.SESSION_REGULAR,
                 surfaces.map { OutputConfiguration(it).apply {
+                    // Video must keep SENSOR/BOOTTIME, rather than the default
+                    // MONOTONIC used by some consumers after device deep sleep.
+                    if (it != preview) setTimestampBase(OutputConfiguration.TIMESTAMP_BASE_SENSOR)
                     // Apply the producer transform only to the selfie preview. A view
                     // scale is not a reliable mirror of SurfaceView's separate surface.
                     setMirrorMode(if (it == preview && front) OutputConfiguration.MIRROR_MODE_H
@@ -179,6 +214,10 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
                         if (writer != null && (writer !== recorder || writer.isStopping)) { configured.close(); return }
                         session = configured
                         try {
+                            if (writer != null) compositor?.expectCamera(
+                                characteristics?.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90,
+                                (outputRotation() - takeRotation + 360) % 360, token,
+                                SystemClock.elapsedRealtimeNanos())
                             val request = camera.createCaptureRequest(if (recorder != null) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW)
                             surfaces.forEach { request.addTarget(it) }
                             request.set(CaptureRequest.CONTROL_MODE, CaptureRequest.CONTROL_MODE_AUTO)
@@ -201,7 +240,9 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
                             }, handler)
                             Log.i("CaptureCamera", "camera=${camera.id} rotation=${outputRotation()} front=$front surfaces=${surfaces.size} SDR 1920x1080")
                             update { it.copy(ready = true, front = front,
-                                message = if (it.busy) it.message else "1080p · SDR · audio incluso · 30 fps richiesti") }
+                                switching = if (writer == null) false else it.switching,
+                                message = if (!it.busy && (it.message == "Apertura fotocamera…" || it.switching))
+                                    phaseMessage(CapturePhase.IDLE) else it.message) }
                         } catch (error: Exception) { cameraFailed(error.message ?: "Avvio camera fallito.") }
                     }
                     override fun onConfigureFailed(failed: CameraCaptureSession) {
@@ -213,7 +254,7 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
 
     @SuppressLint("UsableSpace") // Conservative check; no automatic cache reclamation.
     fun start() {
-        if (!state.value.ready || state.value.busy || disposed) return
+        if (!state.value.ready || state.value.busy || state.value.switching || disposed) return
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             update { it.copy(message = "È necessario il permesso microfono.") }
             return
@@ -228,23 +269,35 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
             try {
                 check(device != null && foreground) { "Fotocamera non disponibile." }
                 val file = store.allocate()
-                recorder = AvRecorder(file, outputRotation(), handler,
-                    onPhase = { phase -> update { it.copy(phase = phase, message = when (phase) {
-                        CapturePhase.RECORDING -> "Registrazione in corso"
-                        CapturePhase.PAUSED -> "In pausa"
-                        CapturePhase.RESUMING -> "Preparazione ripresa…"
-                        else -> "Chiusura della ripresa…"
-                    }) } },
+                takeRotation = outputRotation()
+                recorder = AvRecorder(file, takeRotation, handler,
+                    onPhase = { phase -> update { it.copy(phase = phase,
+                        switching = it.switching && phase != CapturePhase.STOPPING,
+                        message = if (it.switching && phase != CapturePhase.STOPPING)
+                            switchMessage(phase) else phaseMessage(phase)) } },
                     onStats = { duration, bytes -> update { it.copy(elapsedNs = duration, bytes = bytes) } },
                     onStopping = { complete ->
+                        val finishVideo = {
+                            val renderer = compositor
+                            compositor = null
+                            if (renderer == null) complete() else renderer.finish { handler.post { complete() } }
+                        }
                         val current = session
-                        if (current == null) complete() else {
-                            pendingDrain = current to complete
+                        if (current == null) finishVideo() else {
+                            pendingDrain = current to finishVideo
                             runCatching { current.stopRepeating() }.onFailure { cameraDrained(current) }
                         }
                     },
                     onFinished = { error -> finalized(file, error) })
-                recorder!!.startMicrophone()
+                val writer = checkNotNull(recorder)
+                compositor = VideoCompositor(writer.surface,
+                    onFrame = { token -> handler.post {
+                        if (writer === recorder && token == sessionGeneration && !writer.isStopping) {
+                            update { it.copy(switching = false, message = phaseMessage(it.phase)) }
+                        }
+                    } },
+                    onError = { reason -> handler.post { if (writer === recorder) writer.abort(reason) } })
+                writer.startMicrophone()
                 createSession()
             } catch (error: Exception) {
                 if (recorder != null) recorder?.abort(error.message ?: "Avvio fallito.") else {
@@ -257,7 +310,7 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
 
     fun pauseOrResume() {
         val phase = state.value.phase
-        if (phase !in listOf(CapturePhase.RECORDING, CapturePhase.PAUSED)) return
+        if (state.value.switching || phase !in listOf(CapturePhase.RECORDING, CapturePhase.PAUSED)) return
         mutableState.value = state.value.copy(phase = if (phase == CapturePhase.PAUSED) CapturePhase.RESUMING else CapturePhase.PAUSING)
         handler.post { if (phase == CapturePhase.PAUSED) recorder?.resume() else recorder?.pause() }
     }
@@ -266,13 +319,13 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
 
     private fun finalized(file: File, error: String?) {
         recorder = null
-        if (foreground && !disposed) { if (device == null) openCamera() else createSession() }
+        if (foreground && !disposed) { if (device == null) { reopenOnClosed = true; openCamera() } else createSession() }
         scope.launch {
             mutableState.value = state.value.copy(phase = CapturePhase.SAVING, message = "Salvataggio della ripresa…")
             val result = withContext(Dispatchers.IO) {
                 runCatching { check(error == null) { error.orEmpty() }; inspectRecording(file); store.publish(file) }
             }
-            mutableState.value = state.value.copy(phase = CapturePhase.IDLE, message = result.fold(
+            mutableState.value = state.value.copy(phase = CapturePhase.IDLE, switching = false, message = result.fold(
                 { "Ripresa salvata con tracce video e audio." }, { "${it.message} File provvisorio conservato." }))
             refreshRecordings()
             if (disposed) { scope.cancel(); thread.quitSafely() }
@@ -292,7 +345,7 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
         }
     }
 
-    private fun closeCamera() {
+    private fun closeCamera(reopen: Boolean = false) {
         ++generation
         ++sessionGeneration
         opening = false
@@ -300,10 +353,25 @@ class CaptureController(context: Context) : DefaultLifecycleObserver {
         pendingDrain = null
         session?.close()
         session = null
-        device?.close()
+        reopenOnClosed = reopen
+        device?.let { closingCamera = it; it.close() }
         device = null
         drain?.invoke()
         update { it.copy(ready = false) }
+    }
+
+    private fun phaseMessage(phase: CapturePhase): String = when (phase) {
+        CapturePhase.RECORDING -> "Registrazione in corso"
+        CapturePhase.PAUSED -> "In pausa"
+        CapturePhase.RESUMING, CapturePhase.STARTING -> "Preparazione ripresa…"
+        CapturePhase.IDLE -> "1080p · SDR · audio incluso · 30 fps richiesti"
+        else -> "Chiusura della ripresa…"
+    }
+
+    private fun switchMessage(phase: CapturePhase): String = when (phase) {
+        CapturePhase.IDLE -> "Cambio fotocamera…"
+        CapturePhase.PAUSED -> "Cambio fotocamera durante la pausa…"
+        else -> "Cambio camera: immagine ferma, audio continuo…"
     }
 
     private fun cameraDrained(completed: CameraCaptureSession) {
